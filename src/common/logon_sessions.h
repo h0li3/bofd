@@ -38,7 +38,7 @@ void list_logon_sessions(ListLogonSessionsCallback callback, void* user_data)
 	for (ULONG i = 0; i < session_count; ++i) {
 		status = secur32$LsaGetLogonSessionData(&session_list[i], &session_data);
 		if (status != 0) {
-			BeaconPrintf(CALLBACK_ERROR, "could not get session data: 0x%08lx", advapi32$LsaNtStatusToWinError(status));
+			//BeaconPrintf(CALLBACK_ERROR, "could not get session data: 0x%08lx", advapi32$LsaNtStatusToWinError(status));
 			continue;
 		}
 		BOOL goon = callback(session_data, user_data);
