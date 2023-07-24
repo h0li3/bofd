@@ -1,14 +1,22 @@
 # bofd
 
-## Note
+### Build
 
-Update at 2023/05/23
+You must install msys2 clang toolchain before building this project.
 
-Now use clang with llvm pass to build BOFs
-pass: [https://github.com/h0li3/llvmpass_for_bof](https://github.com/h0li3/llvmpass_for_bof)
-
-## ~~Build~~
+Use scoop to install msys2:
 
 ```
-# python build.py
+scoop install msys2
+```
+
+Install clang in msys2:
+
+```
+pacman -S mingw-w64-clang-x86_64-toolchain
+```
+
+```
+vi bofs.txt
+python build.py
 ```
