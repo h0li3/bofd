@@ -1,2 +1,21 @@
-steal_token
+# do persistence using COM technology
+com_persist
 screenshot
+
+# close events in Antiexe
+close_event
+
+# decrypt dpapi blob using win32 crypto api
+unprot_file
+
+# create a minidump for the specified process (crashed)
+minidump
+
+# launch process using rpc or dllload
+launch_exe
+
+# port connect testing
+port
+
+# read windows version from KUSER_SHARED_DATA
+ver
